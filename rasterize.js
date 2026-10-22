@@ -17,7 +17,8 @@ var LookAt = vec3.clone(defaultLookAt); // current look at direction
 var Up = vec3.clone(defaultUp); // current view up vector
 var winLeft = -0.5, winRight = 0.5; // window x extents in view space
 var winBottom = -0.5, winTop = 0.5; // window y extents in view space
-var winNear = 0.5, winFar = 100; // window distance from eye, and far clip distance
+var winDist = 0.5; //window distance from eye 
+var winNear = 0.01, winFar = 100; // clip distances
 
 /* interaction globals */
 const TRANSLATE_STEP = 0.02; // world units moved per key press
@@ -102,13 +103,21 @@ function makeArrayBuffer(values) {
 } // end make array buffer
 
 // read triangles in, load them into webgl buffers
-// each triangle gets its own three vertices, so every pixel in it can share the face normal
 function loadTriangles() {
     var inputTriangles = getJSONFile(INPUT_TRIANGLES_URL,"triangles");
     if (inputTriangles != String.null) {
         for (var whichSet=0; whichSet<inputTriangles.length; whichSet++) {
-            var set = inputTriangles[whichSet];
-            var coordArray = []; // vertex coords for this set, three per triangle
+            addModel(inputTriangles[whichSet]); //add in this set of models by calling to helper
+           
+        } // end for each triangle set
+    } // end if triangles found
+} // end load triangles
+
+//generalized form of loadTriangles' original design, so we can reuse it for part 10
+// builds buffer for one triangle set and adds it to models
+// each triangle gets its own three vertices, so every pixel in it can share the face normal
+function addModel(set){
+     var coordArray = []; // vertex coords for this set, three per triangle
             var normalArray = []; // face normal for each of those vertices
             var vertexNormalArray = []; // file's vertex normals, or the face normal when it has none
             var hasNormals = Array.isArray(set.normals) && (set.normals.length === set.vertices.length);
@@ -147,9 +156,7 @@ function loadTriangles() {
                 translation: vec3.create(), // accumulated translation from the keys
                 rotation: mat4.create() // accumulated rotation from the keys
             });
-        } // end for each triangle set
-    } // end if triangles found
-} // end load triangles
+}
 
 // read lights in from the lights file, keeping the default light if it can't be read
 function loadLights() {
@@ -342,6 +349,100 @@ function translateSelection(axis,amount) {
     vec3.scaleAndAdd(model.translation,model.translation,axis,amount);
 } // end translate selection
 
+
+
+
+// helper for making a triangle set shaped like a box
+//cx,y,z are the center coords, sx,y,z are the size values
+function makeBox(cx,cy,cz,sx,sy,sz,material) {
+    var vertices = [], normals = [], triangles = [];
+    var half = [sx/2,sy/2,sz/2]; //dimensions of box scaled down to half
+    var center = [cx,cy,cz]; //the center of the box
+
+    // a box has 6 faces: for each axis, one face on the + side and one on the - side
+    for (var axis=0; axis<3; axis++) { //for each axis...
+        for (var sign=-1; sign<=1; sign+=2) { //and both signs (both faces for each axis)
+            var a = (axis+1)%3, b = (axis+2)%3; // get the two axes that run along this face
+            var normal = [0,0,0];
+            normal[axis] = sign; // the face normal points straight out along its axis
+            var base = vertices.length; //index of this face's first vertex for making triangles
+
+            // four corners: push out to the face, then +/- along the face's two axes
+            [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(function(corner) { //for each corner 
+                var p = center.slice(); //starting from the box center
+                p[axis] += sign*half[axis]; //move from center to the face along its axis
+                p[a] += corner[0]*half[a]; //then to the face's first in-plane axis
+                p[b] += corner[1]*half[b]; //and along its second
+                vertices.push(p);
+                normals.push(normal); //all four corners use the same face normal, so we get sharp edges
+            });
+            triangles.push([base,base+1,base+2],[base,base+2,base+3]); // quad as 2 seperate triangles
+        }
+    }
+    return {material: material, vertices: vertices, normals: normals, triangles: triangles};
+}
+
+//material building helper so the build calls are easier to read
+//fade just scales the material properties to sell the parallax effect
+//lower fade is darker, with 0 being black
+//diffuse is the base color [r,g,b]
+function mat(diffuse, fade) {
+    return {
+        ambient: [0.15*fade, 0.15*fade, 0.15*fade], //grey ambient, scaled by fade
+        diffuse: diffuse.map(function(c) { return c*fade; }), //scale the color channels too
+        specular: [0.3*fade, 0.3*fade, 0.3*fade], //as well as a soft highlight
+        n: 20 //shininess, unrelated to fade
+    };
+}
+
+//helper for building the torii gates in the scene
+//fun fact, torii is written in japanese as 鳥居, where the first kanji (鳥) is bird and the second (居) is dwelling or abode
+//so, you could say they're birdhouses
+//takes a z value (depth) so we can have the visual parallax effect
+//takes a fade value so we can shade gates that are farther back
+//returns an array of boxes representing the torii parts (needs to actually be added to model by caller)
+function buildToriiGate(z, fade){
+    var red = mat([0.8,0.12,0.05], fade); 
+    var black = mat([0.08,0.08,0.08], fade);
+    return [
+        makeBox(0.3,0.41,z, 0.06,0.62,0.06, red),    // left pillar
+        makeBox(0.7,0.41,z, 0.06,0.62,0.06, red),    // right pillar
+        makeBox(0.5,0.60,z, 0.50,0.04,0.04, red),    // lower crossbeam (the nuki)
+        makeBox(0.5,0.745,z, 0.70,0.05,0.07, black), // top beam (the kasagi)
+        makeBox(0.5,0.785,z, 0.74,0.03,0.08, red)    // cap (the shimaki)
+    ];
+}
+
+//builds the torii scene from part 10 using the buildToriiGate helper
+function buildToriiScene(){
+    models = []; //clear the scene
+    selectedModel = -1; //start with no model selected
+    gl.clearColor(0.85, 0.5, 0.25, 1.0); //background set to a nice orange color
+    var stone = mat([0.35,0.35,0.38], 1); //material for the bottom platform object the gates rest on
+    var gate_count = 10;      // number of gates to spawn
+    var spacing = 0.3;  // z dist between gates
+    var firstZ = 0.1;  // z val of the nearest gate
+    var lastZ = firstZ + (gate_count-1)*spacing; //calculate where the last gate is going to be using the initial pos + rate of change
+    //add a long slab at the bottom (the stone path), we add one gate spacing so it overhangs a little
+    addModel(makeBox(0.5, 0.09, (firstZ+lastZ)/2, 0.9, 0.02, (lastZ-firstZ) + spacing, stone));
+
+  
+    for (var i=0; i<gate_count; i++) { //for each gate requested
+        var z = firstZ + i*spacing; //get the needed z (depth)
+        var fade = 1 - 0.7*(i/(gate_count-1)); // set the gate's fade, 1.0 for nearest, 0.3 for farthest
+        buildToriiGate(z, fade).forEach(addModel); //build and add the gate to the scene
+    }
+
+    lights = [ //lighting for the scene, warm main and cool fill
+        {position:[-1.4,0.8,-0.5], ambient:[0.3,0.2,0.15], diffuse:[1,0.7,0.5], specular:[1,0.8,0.5]},
+        {position:[2,1,-0.5], ambient:[0.0,0.05,0.1], diffuse:[0.2,0.3,0.5], specular:[0.2,0.2,0.2]}
+    ];
+}
+
+
+
+
+
 // handle key presses for view changes, model selection and model transforms
 function handleKeyDown(event) {
     if (event.target.tagName === "INPUT") return; // leave typing in UI fields alone
@@ -349,7 +450,12 @@ function handleKeyDown(event) {
     var haveSelection = (selectedModel >= 0);
 
     switch (event.key) {
+
+        //part 10: torii gate scene!
+        case "!": buildToriiScene(); break;
+
         // part 4: change the view
+        
         case "a": vec3.scaleAndAdd(Eye,Eye,axes.right,-TRANSLATE_STEP); break; // view left
         case "d": vec3.scaleAndAdd(Eye,Eye,axes.right,TRANSLATE_STEP); break; // view right
         case "w": vec3.scaleAndAdd(Eye,Eye,axes.forward,TRANSLATE_STEP); break; // view forward
@@ -434,10 +540,12 @@ function renderTriangles() {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); // clear frame/depth buffers
     requestAnimationFrame(renderTriangles);
 
+    var scale = winNear / winDist; //we need to scale the matrix to the near plane, so we use the ratio of the near distance and window distance
+
     // viewing and projection transforms, shared by every model
     var center = vec3.add(vec3.create(),Eye,LookAt); // point the eye looks at
     var viewMatrix = mat4.lookAt(mat4.create(),Eye,center,Up);
-    var projMatrix = mat4.frustum(mat4.create(),winLeft,winRight,winBottom,winTop,winNear,winFar);
+    var projMatrix = mat4.frustum(mat4.create(),winLeft*scale,winRight*scale,winBottom*scale,winTop*scale,winNear,winFar); //now the window edges and frustum are both defined at the near plane
     gl.uniformMatrix4fv(viewMatrixULoc,false,viewMatrix);
     gl.uniformMatrix4fv(projMatrixULoc,false,projMatrix);
 
